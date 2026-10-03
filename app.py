@@ -1,7 +1,7 @@
 import streamlit as str_app
 from google import genai
 import pandas as pd
-import pyrebase
+import requests
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 str_app.set_page_config(
@@ -10,27 +10,6 @@ str_app.set_page_config(
     layout="wide"
 )
 
-# --- INICIALIZAÇÃO DO FIREBASE ---
-def init_firebase():
-    """Inicializa e retorna a autenticação do Firebase usando os segredos do Streamlit."""
-    try:
-        firebase_config = {
-            "apiKey": str_app.secrets["firebase"]["apiKey"],
-            "authDomain": str_app.secrets["firebase"]["authDomain"],
-            "projectId": str_app.secrets["firebase"]["projectId"],
-            "storageBucket": str_app.secrets["firebase"]["storageBucket"],
-            "messagingSenderId": str_app.secrets["firebase"]["messagingSenderId"],
-            "appId": str_app.secrets["firebase"]["appId"],
-            "databaseURL": ""
-        }
-        firebase = pyrebase.initialize_app(firebase_config)
-        return firebase.auth()
-    except Exception as e:
-        str_app.error(f"Erro ao carregar credenciais do Firebase: {e}")
-        return None
-
-auth = init_firebase()
-
 # --- CONFIGURAÇÃO DO GEMINI AI ---
 gemini_key = str_app.secrets.get("GEMINI_API_KEY") if "GEMINI_API_KEY" in str_app.secrets else None
 client = genai.Client(api_key=gemini_key) if gemini_key else None
@@ -38,6 +17,50 @@ client = genai.Client(api_key=gemini_key) if gemini_key else None
 # Inicializa o estado de sessão
 if "user" not in str_app.session_state:
     str_app.session_state["user"] = None
+
+# --- FUNÇÕES DE AUTENTICAÇÃO VIA FIREBASE REST API ---
+def firebase_login(email, password):
+    try:
+        api_key = str_app.secrets["firebase"]["apiKey"]
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
+        response = requests.post(url, json=payload)
+        data = response.json()
+        if "idToken" in data:
+            return data
+        else:
+            return None
+    except Exception:
+        return None
+
+def firebase_signup(email, password):
+    try:
+        api_key = str_app.secrets["firebase"]["apiKey"]
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={api_key}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
+        response = requests.post(url, json=payload)
+        data = response.json()
+        if "idToken" in data:
+            return True, "Conta criada com sucesso!"
+        else:
+            message = data.get("error", {}).get("message", "Erro desconhecido")
+            return False, message
+    except Exception as e:
+        return False, str(e)
+
+def firebase_reset_password(email):
+    try:
+        api_key = str_app.secrets["firebase"]["apiKey"]
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
+        payload = {"requestType": "PASSWORD_RESET", "email": email}
+        response = requests.post(url, json=payload)
+        data = response.json()
+        if "email" in data:
+            return True
+        else:
+            return False
+    except Exception:
+        return False
 
 # --- FUNÇÕES DE MATEMÁTICA FINANCEIRA ---
 def calcular_sac(valor_financiado, taxa_juros_anual, prazo_meses):
@@ -84,8 +107,8 @@ def calcular_price(valor_financiado, taxa_juros_anual, prazo_meses):
         })
     return cronograma
 
-# --- TELA DE AUTENTICAÇÃO (LOGIN / CADASTRO) ---
-def show_login_screen(auth_obj):
+# --- TELA DE AUTENTICAÇÃO ---
+def show_login_screen():
     col1, col2, col3 = str_app.columns([1, 2, 1])
     with col2:
         str_app.markdown("<h2 style='text-align: center;'>🏢 Construtora Longitude</h2>", unsafe_allow_html=True)
@@ -102,12 +125,12 @@ def show_login_screen(auth_obj):
                 if not email or not password:
                     str_app.warning("Preencha o e-mail e a senha.")
                 else:
-                    try:
-                        user = auth_obj.sign_in_with_email_and_password(email, password)
-                        str_app.session_state["user"] = user
+                    user_data = firebase_login(email, password)
+                    if user_data:
+                        str_app.session_state["user"] = user_data
                         str_app.success("Autenticado com sucesso! Entrando...")
                         str_app.rerun()
-                    except Exception:
+                    else:
                         str_app.error("E-mail ou senha inválidos. Tente novamente.")
 
         with tab2:
@@ -118,11 +141,11 @@ def show_login_screen(auth_obj):
                 if not novo_email or not nova_senha:
                     str_app.warning("Preencha todos os campos.")
                 else:
-                    try:
-                        auth_obj.create_user_with_email_and_password(novo_email, nova_senha)
+                    success, msg = firebase_signup(novo_email, nova_senha)
+                    if success:
                         str_app.success("Conta criada com sucesso! Vá para a aba 'Entrar'.")
-                    except Exception as e:
-                        str_app.error(f"Erro ao criar conta (mínimo de 6 caracteres na senha): {e}")
+                    else:
+                        str_app.error(f"Erro ao criar conta: {msg}")
 
         with tab3:
             reset_email = str_app.text_input("E-mail cadastrado", key="reset_email")
@@ -130,13 +153,12 @@ def show_login_screen(auth_obj):
                 if not reset_email:
                     str_app.warning("Informe o seu e-mail.")
                 else:
-                    try:
-                        auth_obj.send_password_reset_email(reset_email)
+                    if firebase_reset_password(reset_email):
                         str_app.success("E-mail de recuperação enviado com sucesso!")
-                    except Exception:
+                    else:
                         str_app.error("Erro ao enviar e-mail. Verifique o endereço.")
 
-# --- TELA PRINCIPAL (APÓS LOGIN) ---
+# --- TELA PRINCIPAL ---
 def show_main_app():
     user_info = str_app.session_state["user"]
     
@@ -188,13 +210,8 @@ def show_main_app():
         str_app.divider()
         str_app.subheader("📈 Gráficos Interativos de Evolução")
 
-        fig_prest = px.line(df_total, x="Mês", y="Prestação", color="Sistema", title="Comparativo das Prestações Mensais")
-        fig_prest.update_layout(template="plotly_white", hovermode="x unified")
-        str_app.plotly_chart(fig_prest, use_container_width=True)
-
-        fig_saldo = px.line(df_total, x="Mês", y="Saldo Devedor", color="Sistema", title="Evolução do Saldo Devedor")
-        fig_saldo.update_layout(template="plotly_white", hovermode="x unified")
-        str_app.plotly_chart(fig_saldo, use_container_width=True)
+        str_app.line_chart(df_total, x="Mês", y="Prestação", color="Sistema")
+        str_app.line_chart(df_total, x="Mês", y="Saldo Devedor", color="Sistema")
 
         str_app.divider()
         if modo_exibicao.startswith("Ambos"):
@@ -234,9 +251,6 @@ def show_main_app():
 
 # --- ROTEADOR ---
 if str_app.session_state["user"] is None:
-    if auth:
-        show_login_screen(auth)
-    else:
-        str_app.error("Erro crítico: Firebase não inicializado.")
+    show_login_screen()
 else:
     show_main_app()
