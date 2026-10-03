@@ -1,1 +1,5 @@
 streamlit
+pyrebase
+pandas
+plotly
+google-genai
