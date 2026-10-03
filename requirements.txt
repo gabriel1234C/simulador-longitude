@@ -1,5 +1,5 @@
 streamlit
-pyrebase
+requests
 pandas
 plotly
 google-genai
